@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- 箱（パッケージ） -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M36,44 L54,34 L72,44 L72,66 L54,76 L36,66 Z" />
+    <path android:fillColor="#CDEBD9"
+        android:pathData="M54,54 L72,44 L72,66 L54,76 Z" />
+    <!-- 再生の矢印 -->
+    <path android:strokeColor="#2E6B4F" android:strokeWidth="3.5" android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M47,57 A8,8 0 1,1 55,64" />
+    <path android:fillColor="#2E6B4F" android:pathData="M43,55 L48,61 L51,54 Z" />
+</vector>

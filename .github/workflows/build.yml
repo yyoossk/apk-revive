@@ -1,0 +1,14 @@
+name: Build APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    uses: yyoossk/android-build-env/.github/workflows/android-build.yml@main
+    with:
+      gradle-task: assembleDebug
+      gradle-version: "8.9"
+      artifact-name: apk-revive-debug
