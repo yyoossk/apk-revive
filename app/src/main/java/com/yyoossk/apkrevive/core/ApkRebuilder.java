@@ -32,6 +32,8 @@ public final class ApkRebuilder {
         public int targetSdk;
         /** targetSdk 31 以上のとき、intent-filter を持つコンポーネントに exported=true を補う */
         public boolean addMissingExported = true;
+        /** 追加するファイル（zip 内パス → 実ファイル）。64bit 版 .so の差し替えに使う */
+        public java.util.Map<String, File> additions = new java.util.LinkedHashMap<>();
     }
 
     public static final class Result {
@@ -44,6 +46,8 @@ public final class ApkRebuilder {
 
     private static final long DOS_TIME_2008 = 1199145600000L; // 再現性のため固定時刻
     private static final int ALIGN_EXTRA_ID = 0xD935;
+    /** .so は 16KB 境界に置く（16KB ページの端末でも非圧縮のまま読み込めるように。zipalign -P 16 相当） */
+    static final int SO_ALIGN = 16384;
 
     private ApkRebuilder() {}
 
@@ -62,12 +66,13 @@ public final class ApkRebuilder {
             Enumeration<? extends ZipEntry> en = zip.entries();
             while (en.hasMoreElements()) {
                 ZipEntry e = en.nextElement();
-                if (e.isDirectory() || isOldSignatureFile(e.getName()) || e.getName().equals("AndroidManifest.xml")) {
+                if (e.isDirectory() || isOldSignatureFile(e.getName()) || e.getName().equals("AndroidManifest.xml")
+                        || opt.additions.containsKey(e.getName())) {
                     continue;
                 }
                 entries.add(e);
             }
-            int total = entries.size() + 1;
+            int total = entries.size() + 1 + opt.additions.size();
 
             CountingOutputStream counter = new CountingOutputStream(new FileOutputStream(unsignedOut));
             try (ZipOutputStream zos = new ZipOutputStream(counter)) {
@@ -112,7 +117,7 @@ public final class ApkRebuilder {
                         out.setSize(size);
                         out.setCompressedSize(size);
                         out.setCrc(crc);
-                        int align = name.endsWith(".so") ? 4096 : 4;
+                        int align = name.endsWith(".so") ? SO_ALIGN : 4;
                         out.setExtra(alignmentExtra(counter.count, name, align));
                     } else {
                         out.setMethod(ZipEntry.DEFLATED);
@@ -126,12 +131,38 @@ public final class ApkRebuilder {
                     done++;
                     if (progress != null) progress.onProgress(done, total);
                 }
+                for (java.util.Map.Entry<String, File> add : opt.additions.entrySet()) {
+                    File f = add.getValue();
+                    CRC32 c = new CRC32();
+                    try (InputStream in = new java.io.FileInputStream(f)) {
+                        int n;
+                        while ((n = in.read(buf)) > 0) c.update(buf, 0, n);
+                    }
+                    ZipEntry out = new ZipEntry(add.getKey());
+                    out.setTime(DOS_TIME_2008);
+                    out.setMethod(ZipEntry.STORED);
+                    out.setSize(f.length());
+                    out.setCompressedSize(f.length());
+                    out.setCrc(c.getValue());
+                    out.setExtra(alignmentExtra(counter.count, add.getKey(), SO_ALIGN));
+                    zos.putNextEntry(out);
+                    try (InputStream in = new java.io.FileInputStream(f)) {
+                        int n;
+                        while ((n = in.read(buf)) > 0) zos.write(buf, 0, n);
+                    }
+                    zos.closeEntry();
+                    done++;
+                    if (progress != null) progress.onProgress(done, total);
+                }
+                if (!opt.additions.isEmpty()) {
+                    result.changes.add("64bit 版ライブラリ " + opt.additions.size() + " 個を arm64-v8a として追加");
+                }
                 if (arscStoredChanged) {
                     result.changes.add("resources.arsc を非圧縮で格納（新しいAndroidの要件）");
                 }
             }
         }
-        result.changes.add("古い署名ファイルを削除し、zipalign 相当の整列を実施");
+        result.changes.add("古い署名ファイルを削除し、zipalign 相当の整列を実施（.so は 16KB 境界）");
         return result;
     }
 

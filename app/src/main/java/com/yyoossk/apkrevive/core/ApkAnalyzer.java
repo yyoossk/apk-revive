@@ -25,6 +25,11 @@ public final class ApkAnalyzer {
     private ApkAnalyzer() {}
 
     public static ApkReport analyze(File apk, DeviceProfile device) throws IOException {
+        return analyze(apk, device, null);
+    }
+
+    /** tmpDir を渡すと、64bit 化の判定用にネイティブライブラリを一時展開して解析する */
+    public static ApkReport analyze(File apk, DeviceProfile device, File tmpDir) throws IOException {
         ApkReport r = new ApkReport();
         AndroidManifestBlock manifest;
         try (ZipFile zip = new ZipFile(apk)) {
@@ -45,6 +50,10 @@ public final class ApkAnalyzer {
                 }
             }
             r.abis.addAll(abis);
+            r.arm64SourceAbi = Arm64Plan.pickSourceAbi(r.abis);
+            if (r.arm64SourceAbi != null && tmpDir != null) {
+                scanNativeLibs(zip, r, tmpDir);
+            }
             SignatureScan sig = SignatureScan.scan(apk, zip);
             r.hasV1Signature = sig.v1;
             r.hasV2Signature = sig.v2;
@@ -71,6 +80,34 @@ public final class ApkAnalyzer {
         return r;
     }
 
+    static void scanNativeLibs(ZipFile zip, ApkReport r, File tmpDir) throws IOException {
+        tmpDir.mkdirs();
+        String prefix = "lib/" + r.arm64SourceAbi + "/";
+        Enumeration<? extends ZipEntry> en = zip.entries();
+        while (en.hasMoreElements()) {
+            ZipEntry e = en.nextElement();
+            String n = e.getName();
+            if (!n.startsWith(prefix) || !n.endsWith(".so") || n.indexOf('/', prefix.length()) >= 0) continue;
+            NativeLib lib = new NativeLib();
+            lib.path = n;
+            lib.abi = r.arm64SourceAbi;
+            lib.fileName = n.substring(prefix.length());
+            lib.size = e.getSize();
+            File tmp = new File(tmpDir, "scan.so");
+            try (InputStream in = zip.getInputStream(e)) {
+                java.nio.file.Files.copy(in, tmp.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            try {
+                lib.elf = ElfInfo.parse(tmp);
+            } catch (IOException ex) {
+                lib.elf = null;
+            }
+            NativeLibCatalog.classify(lib, tmp);
+            tmp.delete();
+            r.nativeLibs.add(lib);
+        }
+    }
+
     static int countMissingExported(AndroidManifestBlock manifest) {
         ResXmlElement app = manifest.getApplicationElement();
         if (app == null) return 0;
@@ -86,6 +123,11 @@ public final class ApkAnalyzer {
             }
         }
         return count;
+    }
+
+    static boolean hasAppCode(ApkReport r) {
+        for (NativeLib l : r.nativeLibs) if (l.kind == NativeLib.Kind.APP_CODE) return true;
+        return false;
     }
 
     private static void buildIssues(ApkReport r, DeviceProfile device) {
@@ -126,18 +168,31 @@ public final class ApkAnalyzer {
                 if (abi.contains("64")) has64 = true;
                 if (device.supportsAbi(abi)) runnable = true;
             }
+            boolean swappable = r.arm64SourceAbi != null && !r.nativeLibs.isEmpty() && !hasAppCode(r);
+            String howTo = swappable
+                    ? "各ライブラリの 64bit 版（arm64-v8a）を用意できれば、差し替えて 64bit 化できます。"
+                    : r.arm64SourceAbi != null
+                    ? "アプリ固有のコード（ゲームエンジン本体など）を含むため、差し替えでは 64bit 化できない見込みです。"
+                    : "再構築では直せません。";
             if (!runnable) {
                 r.issues.add(new ApkReport.Issue(ApkReport.Severity.ERROR,
                         "この端末のCPUに対応していません",
                         "含まれるネイティブライブラリ（" + String.join(", ", r.abis) + "）はこの端末で動きません。"
-                                + (device.is64BitOnly() ? "この端末は64bit専用です。" : "")
-                                + "再構築では直せず、元のソースからの作り直しが必要です。",
-                        false));
-                r.hasUnfixableError = true;
+                                + (device.is64BitOnly() ? "この端末は64bit専用です。" : "") + howTo,
+                        swappable));
+                if (!swappable) r.hasUnfixableError = true;
             } else if (!has64) {
                 r.issues.add(new ApkReport.Issue(ApkReport.Severity.WARNING,
                         "32bit専用のアプリです",
-                        "この端末では動きますが、64bit専用の端末（最近の一部機種）では動きません。再構築では直せません。",
+                        "この端末では動きますが、64bit専用の端末（最近の一部機種）では動きません。" + howTo,
+                        swappable));
+            }
+            if (!runnable && !swappable) {
+                r.issues.add(new ApkReport.Issue(ApkReport.Severity.INFO,
+                        "ほかの方法",
+                        "・仮想環境アプリ（32bit 対応の Android を丸ごと動かすもの）で動かす\n"
+                                + "・root 化した端末なら 32bit 用の zygote を有効にする改造がある\n"
+                                + "・開発元に 64bit 版の提供を依頼する",
                         false));
             }
         }

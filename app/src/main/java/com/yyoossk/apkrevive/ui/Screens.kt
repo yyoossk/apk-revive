@@ -41,6 +41,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -57,6 +58,8 @@ import androidx.compose.ui.unit.dp
 import com.yyoossk.apkrevive.ReviveViewModel
 import com.yyoossk.apkrevive.Screen
 import com.yyoossk.apkrevive.core.ApkReport
+import com.yyoossk.apkrevive.core.Arm64Plan
+import com.yyoossk.apkrevive.core.NativeLib
 
 private const val APK_MIME = "application/vnd.android.package-archive"
 
@@ -175,9 +178,10 @@ private fun HomeScreen(vm: ReviveViewModel) {
             Text("・targetSdk の引き上げ（インストールできる最低ラインまで）", style = MaterialTheme.typography.bodyMedium)
             Text("・新しい署名方式（v2 / v3）での再署名", style = MaterialTheme.typography.bodyMedium)
             Text("・zipalign 相当の整列、android:exported の補完", style = MaterialTheme.typography.bodyMedium)
+            Text("・32bit 専用アプリの 64bit 化（ライブラリの 64bit 版を用意できる場合）", style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(4.dp))
             Text("できないこと", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-            Text("・32bit専用アプリの64bit化　・アプリの改造", style = MaterialTheme.typography.bodyMedium)
+            Text("・ゲームエンジン本体などアプリ固有コードの 64bit 化　・アプリの改造", style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -278,7 +282,13 @@ private fun OptionsScreen(s: Screen.Options, vm: ReviveViewModel) {
     val choices = listOf(r.recommendedTargetSdk, 28, 30, 33, 35).filter { it >= current }.distinct().sorted()
     var target by remember { mutableIntStateOf(r.recommendedTargetSdk) }
     var addExported by remember { mutableStateOf(true) }
+    var make64 by remember { mutableStateOf(true) }
+    val plan = vm.plan
+    val planReady = plan != null && plan.isComplete
     Page {
+        if (plan != null) {
+            Arm64Section(s, vm, plan, make64 && planReady, onToggle = { make64 = it })
+        }
         SectionCard("targetSdk") {
             Text("現在: $current", style = MaterialTheme.typography.bodyMedium)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -312,7 +322,7 @@ private fun OptionsScreen(s: Screen.Options, vm: ReviveViewModel) {
         SectionCard("常に行う処理") {
             LockedRow("古い署名を外して v1 + v2 + v3 で再署名")
             LockedRow("resources.arsc を非圧縮で格納")
-            LockedRow("zipalign 相当の整列（ネイティブライブラリは 4KB 境界）")
+            LockedRow("zipalign 相当の整列（ネイティブライブラリは 16KB 境界）")
         }
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Text(
@@ -321,9 +331,104 @@ private fun OptionsScreen(s: Screen.Options, vm: ReviveViewModel) {
             )
         }
         Button(
-            onClick = { vm.rebuild(s, target, addExported) },
+            onClick = { vm.rebuild(s, target, addExported, make64 && planReady) },
             modifier = Modifier.fillMaxWidth().height(52.dp),
-        ) { Text("再構築する") }
+        ) { Text(if (make64 && planReady) "64bit 化して再構築する" else "再構築する") }
+    }
+}
+
+// ---------------- 64bit 化 ----------------
+
+@Composable
+private fun Arm64Section(
+    s: Screen.Options,
+    vm: ReviveViewModel,
+    plan: Arm64Plan,
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit,
+) {
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) vm.addReplacements(uris, s)
+    }
+    SectionCard("64bit 化（ライブラリの差し替え）") {
+        Text(
+            "${plan.sourceAbi} 用のライブラリを、あなたが用意した arm64-v8a 用の .so で差し替えます。" +
+                "コードを変換するのではなく、同じライブラリの 64bit 版を入れる方式です。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text("${plan.readyCount()} / ${plan.items.size} 個そろっています", fontWeight = FontWeight.Medium)
+        LinearProgressIndicator(
+            progress = { if (plan.items.isEmpty()) 0f else plan.readyCount().toFloat() / plan.items.size },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        plan.items.values.forEach { LibRow(it, onRemove = { vm.removeReplacement(it.source.fileName, s) }) }
+        if (s.message != null) {
+            Text(s.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        if (plan.hasBlocker()) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Text(
+                    "差し替えできないライブラリが含まれています。このアプリは 64bit 化できない見込みです。",
+                    Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        OutlinedButton(
+            onClick = { picker.launch(arrayOf("application/octet-stream", "application/x-sharedlib", "*/*")) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("64bit 版の .so を選ぶ（複数可）") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (plan.isComplete) "64bit 化する（32bit 版も残します）" else "すべてそろうと 64bit 化できます",
+                Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+            )
+            Switch(checked = enabled, onCheckedChange = onToggle, enabled = plan.isComplete)
+        }
+    }
+}
+
+@Composable
+private fun LibRow(it: Arm64Plan.Item, onRemove: () -> Unit) {
+    val lib = it.source
+    val (badge, color) = when (lib.kind) {
+        NativeLib.Kind.SWAPPABLE -> "差し替え可" to MaterialTheme.colorScheme.primary
+        NativeLib.Kind.NDK_RUNTIME -> "NDK" to MaterialTheme.colorScheme.primary
+        NativeLib.Kind.ENGINE_MAYBE -> "要検証" to MaterialTheme.colorScheme.tertiary
+        NativeLib.Kind.APP_CODE -> "差し替え不可" to MaterialTheme.colorScheme.error
+        NativeLib.Kind.UNKNOWN -> "不明" to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val statusIcon = when (it.status) {
+        Arm64Plan.Status.OK -> Icons.Filled.CheckCircle
+        Arm64Plan.Status.WARN -> Icons.Filled.Warning
+        Arm64Plan.Status.ERROR -> Icons.Filled.Close
+        Arm64Plan.Status.MISSING -> null
+    }
+    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(lib.fileName, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+            val sub = listOfNotNull(lib.label, lib.version, "JNI ${lib.elf?.javaSymbols?.size ?: 0}個").joinToString(" · ")
+            Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(badge, style = MaterialTheme.typography.labelSmall, color = color)
+        if (statusIcon != null) {
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                statusIcon, contentDescription = null, modifier = Modifier.size(20.dp),
+                tint = when (it.status) {
+                    Arm64Plan.Status.OK -> MaterialTheme.colorScheme.primary
+                    Arm64Plan.Status.WARN -> MaterialTheme.colorScheme.tertiary
+                    else -> MaterialTheme.colorScheme.error
+                },
+            )
+        }
+    }
+    if (it.status == Arm64Plan.Status.MISSING) {
+        lib.hint?.let { h -> Text(h, style = MaterialTheme.typography.bodySmall) }
+    } else {
+        it.problems.forEach { p -> Text("・$p", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        TextButton(onClick = onRemove) { Text("選び直す") }
     }
 }
 

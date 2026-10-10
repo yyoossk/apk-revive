@@ -31,6 +31,10 @@ public final class ApkReport {
     /** 実際に使われる targetSdk（未指定なら minSdk、どちらも無ければ 1） */
     public int effectiveTargetSdk;
     public final List<String> abis = new ArrayList<>();
+    /** 64bit 化の元になる ABI のライブラリ一覧（対象外なら空） */
+    public final List<NativeLib> nativeLibs = new ArrayList<>();
+    /** 64bit 化の元にする ABI（armeabi-v7a など）。対象外なら null */
+    public String arm64SourceAbi;
     public boolean hasV1Signature;
     public boolean hasV2Signature;
     public boolean hasV3Signature;
